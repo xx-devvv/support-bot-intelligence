@@ -1,107 +1,85 @@
 import streamlit as st
 import os
-import requests
+import base64
 from dotenv import load_dotenv
 from openai import OpenAI
-import base64
 
-#page configuration
-st.set_page_config(page_title="SupportBot", page_icon="🤖", layout="centered")
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="Customer Support Intelligence", page_icon="🎧", layout="centered")
 load_dotenv()
 
-st.title("Customer Support Intelligence Bot")
+# --- 2. HARDCODED MODEL (The 'Brain') ---
+# We are locking this to Qwen 2.5 VL (72B is smarter/better than 7B and usually free)
+MODEL_ID = "qwen/qwen-2.5-vl-72b-instruct:free"
+
+st.title("🎧 Customer Support Intelligence Bot")
 st.markdown("### Kindly upload a ticket screenshot for assessment")
 
-#connecting to open router
+# --- 3. CONNECT TO OPENROUTER ---
 api_key = os.getenv("OPENROUTER_API_KEY")
+
 if not api_key:
-    st.error("❌ API Key not found! Check your .env file.")
-    st.stop()
+    # If using Streamlit Cloud, it gets the key from secrets
+    if "OPENROUTER_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENROUTER_API_KEY"]
+    else:
+        st.error("❌ API Key not found! Check your .env file or Cloud Secrets.")
+        st.stop()
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=api_key,
 )
 
-
-#to fetch vision models only
-@st.cache_data(ttl=3600)
-def get_vision_models():
-    """Scans OpenRouter for models that can SEE images"""
-    try:
-        response = requests.get("https://openrouter.ai/api/v1/models")
-        all_models = response.json()["data"]
-
-        #targetting vision models
-        vision_models = []
-        for m in all_models:
-            if m['id'].endswith(':free'):
-                # Check for vision capability keywords
-                if any(x in m['id'] for x in ['vision', 'vl', 'gemini', 'free']):
-                    vision_models.append(m['id'])
-
-
-        return sorted(vision_models, key=lambda x: ('qwen' not in x, 'llama' not in x))
-    except:
-        #Reliable backup models
-        return [
-            "qwen/qwen-2.5-vl-72b-instruct:free",
-            "meta-llama/llama-3.2-11b-vision-instruct:free",
-            "google/gemini-2.0-flash-exp:free"
-        ]
-
-
-#Sidebar controls
+# --- 4. SIDEBAR (Cleaned Up) ---
 with st.sidebar:
-    st.header("⚙️ Brain Settings")
-
-    # The Dropdown to fix 429 Errors
-    models = get_vision_models()
-    selected_model = st.selectbox("Choose AI Model", models, index=0)
-
-    st.divider()
-    st.write("📷 **Upload Evidence:**")
-    uploaded_file = st.file_uploader("", type=["png", "jpg", "jpeg"])
-
+    st.header("📂 Ticket Evidence")
+    uploaded_file = st.file_uploader("Upload Error Screenshot", type=["png", "jpg", "jpeg"])
+    
     if uploaded_file:
-        st.image(uploaded_file, caption="Analyzing Screenshot...", use_container_width=True)
+        st.image(uploaded_file, caption="Analyzing Ticket...", use_container_width=True)
+    
+    st.divider()
+    st.info(f"🤖 **System Status:** Online\n🧠 **Model:** {MODEL_ID}")
 
-#chat engine
+# --- 5. CHAT ENGINE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
 
 def encode_image(uploaded_file):
     return base64.b64encode(uploaded_file.getvalue()).decode('utf-8')
 
-
-#displaying chat history
+# Display Chat History
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
 # Handle User Input
-if prompt := st.chat_input("What is the error here?"):
-
+if prompt := st.chat_input("Describe the issue or ask for help..."):
+    
     # 1. Show User Message
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # 2. Build the Payload
-    messages_payload = [{"role": "system",
-                         "content": "You are a Level 2 Technical Support Agent. Analyze the image and text provided."}]
+    # 2. STRICT SYSTEM PROMPT (The 'Persona')
+    system_prompt = """You are a dedicated Customer Support Intelligence Bot. 
+    Your ONLY goal is to solve the user's technical issues efficiently.
+    - If an image is provided, analyze the error message in it and provide a step-by-step fix.
+    - If no image is provided, ask clarifying questions to identify the problem.
+    - Be polite, professional, and solution-oriented. Do not waste time with small talk."""
 
+    messages_payload = [{"role": "system", "content": system_prompt}]
+    
     # Add conversation history
     for msg in st.session_state.messages[-4:]:
         messages_payload.append(msg)
 
-    # 3. Attach Image (Crucial Step)
+    # 3. Attach Image (If uploaded)
     if uploaded_file:
         base64_img = encode_image(uploaded_file)
-        # We must attach the image to the latest user message
-        # Remove the text-only version we just saved to history
-        messages_payload.pop()
+        # Remove the text-only version we just saved
+        messages_payload.pop() 
         # Add the version with the image attached
         messages_payload.append({
             "role": "user",
@@ -117,18 +95,24 @@ if prompt := st.chat_input("What is the error here?"):
         full_response = ""
         try:
             stream = client.chat.completions.create(
-                model=selected_model,
+                model=MODEL_ID,
                 messages=messages_payload,
                 stream=True,
-                extra_headers={"HTTP-Referer": "http://localhost:8501", "X-Title": "SupportBot"}
+                extra_headers={
+                    "HTTP-Referer": "http://localhost:8501", 
+                    "X-Title": "SupportBot"
+                }
             )
             for chunk in stream:
                 if chunk.choices[0].delta.content:
                     full_response += chunk.choices[0].delta.content
                     response_placeholder.markdown(full_response + "▌")
             response_placeholder.markdown(full_response)
+        
         except Exception as e:
-            st.error(f"⚠️ Error with {selected_model}: {e}")
-            st.info("💡 Tip: Use the dropdown in the sidebar to try a different model (like Qwen or Llama)!")
+            # Clean Error Message
+            st.error("⚠️ System Busy (429 Error) or Model Unavailable.")
+            st.warning("💡 Recommendation: Your API Key daily limit might be reached. Try a new Key.")
+            print(e) # Print exact error to terminal for debugging
 
     st.session_state.messages.append({"role": "assistant", "content": full_response})
